@@ -22,7 +22,13 @@ const Chatbot = () => {
             <div>
                 {messages.map((msg, index) => (
                     <div key={index} className={msg.from === "user" ? "user-message" : "bot-message"}>
-                        {msg.text}
+                        {msg.text.split('\n').map((item, idx) => { return (
+                        <React.Fragment key={idx}>
+                            {item}
+                            <br />
+                        </React.Fragment>
+                        )
+                        })}
                     </div>
                 ))}
             </div>

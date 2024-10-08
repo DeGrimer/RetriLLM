@@ -1,13 +1,13 @@
 from langchain_community.document_loaders import JSONLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline, ChatHuggingFace
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
 import torch
 from uuid import uuid4
@@ -56,14 +56,18 @@ def format_docs(docs):
         }
         list_doc.append(curDoc)
     return json.dumps(list_doc, ensure_ascii=False)
-
+def format_context_docs(context):
+    list_doc = []
+    for doc in context:
+        list_doc.append(doc.metadata['title'])
+    return list_doc
 @dataclass
 class BotConfig:
     biencoder_model_name: str = "sergeyzh/rubert-tiny-turbo"
     vector_db_directory: str = "./chroma_langchain_db"
     k: int = 15 
     cross_encoder_model_name: str = "DiTy/cross-encoder-russian-msmarco"
-    llm_model_name: str = "Vikhrmodels/Vikhr-Llama3.1-8B-Instruct-R-21-09-24"
+    llm_model_name: str = "t-bank-ai/T-lite-instruct-0.1"
 
 class QABot():
     def __init__(self, config : BotConfig):
@@ -83,7 +87,7 @@ class QABot():
 
         # Add cross-encoder for rerank docs from bi encoder
         self.cross_encoder = HuggingFaceCrossEncoder(model_name=config.cross_encoder_model_name)
-        self.compressor = CrossEncoderReranker(model=self.cross_encoder, top_n=5)
+        self.compressor = CrossEncoderReranker(model=self.cross_encoder, top_n=3)
         self.compression_retriever = ContextualCompressionRetriever(
             base_compressor=self.compressor, base_retriever=self.retriever
         )
@@ -95,26 +99,55 @@ class QABot():
             bnb_4bit_compute_dtype="float16",
             bnb_4bit_use_double_quant=True,
         )
-        llm_model_name = config.llm_model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(llm_model_name, device_map="auto", quantization_config=quantization_config)
-        pipe = pipeline("text-generation", model=self.model, tokenizer=self.tokenizer, max_new_tokens=512, top_k=50, temperature=0.1)
-        self.llm = HuggingFacePipeline(pipeline=pipe)
-
+        llm = HuggingFacePipeline.from_model_id(
+            model_id=config.llm_model_name,
+            task="text-generation",
+            pipeline_kwargs=dict(
+                max_new_tokens=512,
+                return_full_text=False,
+                top_k=50,
+                do_sample = True,
+                temperature=0.1
+            ),
+            model_kwargs={"quantization_config": quantization_config},
+        )
+        self.chat_model = ChatHuggingFace(llm=llm)
+    def get_ans(self, input):
         #prompt
-        template = """system: Your task is to answer the user's questions using only the information from the provided documents. Give two answers to each question: one with a list of relevant document identifiers and the second with the answer to the question itself, using documents with these identifiers.
-        document: {context}
-        user: {question}
-        assistant: """
-        self.custom_rag_prompt = PromptTemplate.from_template(template)
+        system_prompt = (
+            "You are an assistant for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer "
+            "the question. If you don't know the answer, say that you "
+            "don't know. Use three sentences maximum and keep the "
+            "answer concise."
+            "\n\n"
+            "{context}"
+        )
+        prompt = ChatPromptTemplate(
+            [
+                ('assistant', system_prompt),
+                ('user', '{question}'),
+            ]
+        )
 
         #create chain for app
-        self.rag_chain = (
-            {"context": self.compression_retriever | format_docs, "question": RunnablePassthrough()}
-            | self.custom_rag_prompt
-            | self.llm
-            | StrOutputParser())
+        rag_chain = (
+        RunnablePassthrough.assign(context=(lambda x: format_docs(x["context"])))
+        | prompt
+        | self.chat_model
+        | StrOutputParser())
+        rag_chain_with_source = RunnableParallel(
+        {"context": self.compression_retriever, "question": RunnablePassthrough()}
+        ).assign(answer=rag_chain, source=lambda x: format_context_docs(x["context"]))
+
+        asi_msg = rag_chain_with_source.invoke(input)
+        answer = f"""
+         Для ответа были использованы следующие документы: {asi_msg['source']}
+        \n
+        Ответ: {asi_msg['answer']}
+        """
+        return answer.split('://://')[0]
     def forward(self, input):
-        asi_msg = self.rag_chain.invoke(input)
-        return asi_msg.split("assistant: ")[-1]
+        asi_msg = self.get_ans(input)
+        return asi_msg
 
