@@ -1,0 +1,17 @@
+.react-chatbot-kit-chat-container {
+    position: absolute;
+    width: 100% !important; /* Adjust width as needed */
+    height: 100% !important; /* Adjust height as needed */
+    white-space: pre-wrap;
+}
+
+.react-chatbot-kit-chat-bot-message {
+    width: auto !important; /* Ensure messages adapt to new size */
+    margin-left: 0%;
+}
+.react-chatbot-kit-chat-message-container {
+    position: absolute;
+    height: 90% !important;
+    width: 98% /* Adjust height as needed */
+}
+

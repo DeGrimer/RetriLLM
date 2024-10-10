@@ -8,6 +8,10 @@ from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_postgres import PGVector
+from store import PostgresByteStore
+from langchain.retrievers.multi_vector import MultiVectorRetriever
+from database import COLLECTION_NAME, CONNECTION_STRING
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
 import torch
 from uuid import uuid4
@@ -15,6 +19,9 @@ import json
 from pathlib import Path
 import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Define the metadata extraction function.
 def metadata_func(record: dict, metadata: dict) -> dict:
@@ -65,7 +72,7 @@ def format_context_docs(context):
 class BotConfig:
     biencoder_model_name: str = "sergeyzh/rubert-tiny-turbo"
     vector_db_directory: str = "./chroma_langchain_db"
-    k: int = 15 
+    k: int = 5 
     cross_encoder_model_name: str = "DiTy/cross-encoder-russian-msmarco"
     llm_model_name: str = "t-bank-ai/T-lite-instruct-0.1"
 
@@ -74,14 +81,20 @@ class QABot():
         #Embedding model for bi encoder
         self.biencoder = HuggingFaceEmbeddings(model_name=config.biencoder_model_name)
         #Load vector db
-        self.vector_store = Chroma(
-            collection_name="example_collection",
-            embedding_function=self.biencoder,
-            persist_directory=config.vector_db_directory,
+        vectorstore = PGVector(
+            embeddings=self.biencoder,
+            collection_name=COLLECTION_NAME,
+            connection=CONNECTION_STRING,
+            use_jsonb=True,
         )
-        if len(self.vector_store.get()['metadatas']) == 0:
-            load_docs(self.vector_store)
-        self.retriever = self.vector_store.as_retriever(
+
+        store = PostgresByteStore(CONNECTION_STRING, COLLECTION_NAME)
+        id_key = "doc_id"
+
+        self.retriever = MultiVectorRetriever(
+            vectorstore=vectorstore, 
+            docstore=store, 
+            id_key=id_key,
             search_kwargs={"k": config.k}
         )
 
@@ -137,7 +150,7 @@ class QABot():
         | self.chat_model
         | StrOutputParser())
         rag_chain_with_source = RunnableParallel(
-        {"context": self.compression_retriever, "question": RunnablePassthrough()}
+        {"context": self.retriever, "question": RunnablePassthrough()}
         ).assign(answer=rag_chain, source=lambda x: format_context_docs(x["context"]))
 
         asi_msg = rag_chain_with_source.invoke(input)
