@@ -13,6 +13,7 @@ from store import PostgresByteStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from database import COLLECTION_NAME, CONNECTION_STRING
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
+from langchain.schema.document import Document
 import torch
 from uuid import uuid4
 import json
@@ -34,7 +35,7 @@ def metadata_func(record: dict, metadata: dict) -> dict:
         metadata["source"] = "\\".join(source)
 
     return metadata
-def load_docs(vector_store):
+def load_docs(retriever):
     #Load data from json file
     loader = JSONLoader(
         file_path='./langchain/dataTK.json',
@@ -42,15 +43,40 @@ def load_docs(vector_store):
         content_key="content",
         metadata_func=metadata_func)
 
-    docs = loader.load()
+    documents = loader.load()
+    doc_ids = [str(uuid4()) for _ in documents]
+    child_text_splitter = RecursiveCharacterTextSplitter(chunk_size=400)
+    id_key = "doc_id"
+    all_sub_docs = []
+    for i, doc in enumerate(documents):
+        doc_id = doc_ids[i]
+        sub_docs = child_text_splitter.split_documents([doc])
+        for sub_doc in sub_docs:
+            sub_doc.metadata[id_key] = doc_id
+        all_sub_docs.extend(sub_docs)
+    #Add chunked sub docs to vectorstore
+    retriever.vectorstore.add_documents(all_sub_docs)
+    retriever.docstore.mset(list(zip(doc_ids, documents)))
+    text_summaries = []
+    with open('summarization.json', 'r', encoding='utf-8') as f:
+        text_summaries = json.load(f)
 
-    #Split docs
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
+    #Add summary to vectorstore
+    summary_docs = []
+    for i, (summary, doc_id) in enumerate(zip(text_summaries, doc_ids)):
+        # Define your new metadata here
+        new_metadata = {"page": i, "doc_id": doc_id}
 
-    uuids = [str(uuid4()) for _ in range(len(splits))]
-    #Add docs to vector db
-    vector_store.add_documents(documents=splits, ids=uuids)
+        # Create a new Document instance for each summary
+        doc = Document(page_content=str(summary))
+
+        # Replace the metadata
+        doc.metadata = new_metadata
+
+        # Add the Document to the list
+        summary_docs.append(doc)
+    retriever.vectorstore.add_documents(summary_docs)
+    retriever.docstore.mset(list(zip(doc_ids, documents)))
 
 #Convert relevant docs to json format
 def format_docs(docs):
@@ -96,13 +122,6 @@ class QABot():
             docstore=store, 
             id_key=id_key,
             search_kwargs={"k": config.k}
-        )
-
-        # Add cross-encoder for rerank docs from bi encoder
-        self.cross_encoder = HuggingFaceCrossEncoder(model_name=config.cross_encoder_model_name)
-        self.compressor = CrossEncoderReranker(model=self.cross_encoder, top_n=3)
-        self.compression_retriever = ContextualCompressionRetriever(
-            base_compressor=self.compressor, base_retriever=self.retriever
         )
 
         #Add LLM model
