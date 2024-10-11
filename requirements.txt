@@ -1,0 +1,14 @@
+sqlalchemy
+fastapi
+asyncio
+pickle-mixin
+langchain_core
+langchain
+langchain_huggingface
+langchain_openai
+langchain_postgres
+python-dotenv
+psycopg_binary
+chromadb
+unstructured
+python-pptx
