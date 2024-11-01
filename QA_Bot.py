@@ -1,24 +1,17 @@
 from langchain_community.document_loaders import JSONLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline, ChatHuggingFace
-from langchain.retrievers import ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import CrossEncoderReranker
-from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_core.prompts import  ChatPromptTemplate
 from langchain_postgres import PGVector
 from store import PostgresByteStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from database import COLLECTION_NAME, CONNECTION_STRING
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
+from transformers import AutoTokenizer, BitsAndBytesConfig
 from langchain.schema.document import Document
-import torch
 from uuid import uuid4
 import json
-from pathlib import Path
-import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -106,6 +99,7 @@ class QABot():
     def __init__(self, config : BotConfig):
         #Embedding model for bi encoder
         self.biencoder = HuggingFaceEmbeddings(model_name=config.biencoder_model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.llm_model_name)
         #Load vector db
         vectorstore = PGVector(
             embeddings=self.biencoder,
@@ -131,6 +125,10 @@ class QABot():
             bnb_4bit_compute_dtype="float16",
             bnb_4bit_use_double_quant=True,
         )
+        terminators = [
+            self.tokenizer.eos_token_id,
+            self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        ]
         llm = HuggingFacePipeline.from_model_id(
             model_id=config.llm_model_name,
             task="text-generation",
@@ -139,7 +137,8 @@ class QABot():
                 return_full_text=False,
                 top_k=50,
                 do_sample = True,
-                temperature=0.1
+                temperature=0.1,
+                eos_token_id = terminators
             ),
             model_kwargs={"quantization_config": quantization_config},
         )
